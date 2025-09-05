@@ -2,13 +2,73 @@ import argparse
 import cv2
 import numpy as np
 
-def localize_target(image):
+def order_points(pts):
+    """
+    Orders a list of 4 points corresponding to a rectangle in top-left,
+    top-right, bottom-right, bottom-left order.
+    """
+    rect = np.zeros((4, 2), dtype="float32")
+
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)] # Top-left has the smallest sum
+    rect[2] = pts[np.argmax(s)] # Bottom-right has the largest sum
+
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)] # Top-right has the smallest difference
+    rect[3] = pts[np.argmax(diff)] # Bottom-left has the largest difference
+
+    return rect
+
+def localize_target(image, output_size=600):
     """
     Finds the target card in the image and applies perspective correction.
     """
-    # Placeholder
     print("Stage 1: Localizing target and correcting perspective...")
-    return image
+
+    # Pre-processing
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    # Lower Canny thresholds to detect the low-contrast edge of the card
+    edged = cv2.Canny(blurred, 30, 150)
+
+    # Find contours and sort them by area
+    contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        print("  - No contours found. Returning original image.")
+        return image
+
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
+    # Loop through the largest contours and find the first one with 4 points
+    target_contour_approx = None
+    for c in contours[:5]: # Check the 5 largest contours
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+        if len(approx) == 4:
+            target_contour_approx = approx
+            break
+
+    if target_contour_approx is not None:
+        print("  - Found a 4-point contour, applying perspective transform.")
+        # Order the points
+        ordered_pts = order_points(target_contour_approx.reshape(4, 2))
+
+        # Define the destination points for the warp
+        # We'll warp it to a square image of size `output_size`
+        dst_pts = np.array([
+            [0, 0],
+            [output_size - 1, 0],
+            [output_size - 1, output_size - 1],
+            [0, output_size - 1]], dtype="float32")
+
+        # Compute the perspective transform matrix and apply it
+        matrix = cv2.getPerspectiveTransform(ordered_pts, dst_pts)
+        warped = cv2.warpPerspective(image, matrix, (output_size, output_size))
+
+        return warped
+    else:
+        print("  - Could not find a 4-point contour in the largest contours. Returning original image.")
+        return image
 
 def find_center_and_calibrate_scale(corrected_image):
     """
@@ -26,7 +86,7 @@ def find_center_and_calibrate_scale(corrected_image):
     gray = cv2.GaussianBlur(gray, (9, 9), 2)
 
     # Use Hough Circle Transform to find circles
-    # These parameters may need tuning for real-world images
+    # These parameters were tuned for the synthetic target. They may not work on real images.
     circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=100,
                                param1=50, param2=30, minRadius=10, maxRadius=0) # maxRadius=0 means it will find all sizes
 
@@ -215,35 +275,20 @@ def main():
     Main function to run the scoring process.
     """
     parser = argparse.ArgumentParser(description="Score NSRA PL14 target cards.")
-    parser.add_argument("--image", help="Path to the target image (currently ignored, uses synthetic image).")
+    parser.add_argument("--image", required=True, help="Path to the target image.")
     parser.add_argument("--calibre", required=True, type=float, choices=[0.177, 0.22], help="Calibre of the shots (.177 or .22).")
     args = parser.parse_args()
 
-    # Create a synthetic target and add some test shots to it.
-    # To do this, we need to know the approximate size of the shot holes in pixels.
-    # We use a pre-calculated approximate scale for this, which is a bit of a simplification
-    # for this testing setup.
-    CALIBRE_MM = 4.5 if args.calibre == 0.177 else 5.6
-    APPROX_SCALE_PX_PER_MM = 5.1  # Based on our synthetic target's design (450px / 87.9mm)
-    shot_radius_px = int((CALIBRE_MM / 2) * APPROX_SCALE_PX_PER_MM)
+    # Load the image from the specified path
+    image = cv2.imread(args.image)
+    if image is None:
+        print(f"Error: Could not load image from path: {args.image}")
+        return
 
-    # Place shots clearly on the white background, outside the black aiming mark.
-    # The aiming mark has radius 225 centered at (300,300).
-    # A shot at (100, 500) is ~282 pixels from the center.
-    # A shot at (500, 100) is also ~282 pixels from the center.
-    synthetic_shot_coords = [(100, 500), (500, 100)]
-    synthetic_shots_info = [(x, y, shot_radius_px) for x, y in synthetic_shot_coords]
-
-    synthetic_target_image = create_synthetic_target(shot_holes_info=synthetic_shots_info)
-
-    # The --image argument is ignored, but we print it to show it's received.
-    image_path = args.image if args.image else "synthetic_image"
-    print(f"Processing image: {image_path} for calibre: {args.calibre}")
-
+    print(f"Processing image: {args.image} for calibre: {args.calibre}")
 
     # CV Pipeline
-    # Stage 1 is skipped for now, as we are using a perfect, flat image.
-    corrected_image = localize_target(synthetic_target_image)
+    corrected_image = localize_target(image)
     center, pixels_per_mm = find_center_and_calibrate_scale(corrected_image)
     shot_holes = detect_shot_holes(corrected_image, args.calibre, pixels_per_mm)
     total_score, individual_scores = calculate_score(shot_holes, center, pixels_per_mm, args.calibre)
