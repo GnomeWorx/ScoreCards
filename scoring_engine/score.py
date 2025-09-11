@@ -183,48 +183,74 @@ def calculate_score(shot_holes, center, pixels_per_mm, calibre):
     """
     print(f"Stage 4: Calculating score for calibre {calibre}...")
 
-    # Scaled radii for PL14 target (derived from ISSF 50m Pistol target)
-    # Each tuple is (score, max_radius_for_score_in_mm)
     SCORING_RINGS_MM = [
-        (10, 9.144),
-        (9, 18.288),
-        (8, 27.432),
-        (7, 36.576),
-        (6, 45.72),
-        (5, 54.864),
-        (4, 64.008),
-        (3, 73.152),
-        (2, 82.296),
-        (1, 91.44)
+        (10, 9.144), (9, 18.288), (8, 27.432), (7, 36.576), (6, 45.72),
+        (5, 54.864), (4, 64.008), (3, 73.152), (2, 82.296), (1, 91.44)
     ]
-
-    # Get shot radius in mm for inward gauging
     CALIBRE_MM = 4.5 if calibre == 0.177 else 5.6
     shot_radius_mm = CALIBRE_MM / 2
 
     scores = []
     for hole_coords in shot_holes:
-        # Calculate distance from target center to shot center in pixels
         dist_px = np.sqrt((hole_coords[0] - center[0])**2 + (hole_coords[1] - center[1])**2)
-
-        # Convert distance to mm
         dist_mm = dist_px / pixels_per_mm
-
-        # Apply inward gauging: subtract the shot's radius from the distance
         gauged_dist_mm = dist_mm - shot_radius_mm
 
-        # Determine score
-        shot_score = 0  # Default score is 0 if it's outside the 1-ring
+        shot_score = 0
         for score_value, ring_radius_mm in SCORING_RINGS_MM:
             if gauged_dist_mm <= ring_radius_mm:
                 shot_score = score_value
-                break # Stop at the first (highest) ring it touches
+                break
 
         scores.append(shot_score)
         print(f"  - Shot at {hole_coords}: dist={dist_mm:.2f}mm, gauged_dist={gauged_dist_mm:.2f}mm, score={shot_score}")
 
     total_score = sum(scores)
     return total_score, scores
+
+def draw_results_on_image(image, shot_holes, scores, pixels_per_mm, calibre):
+    """Draws the detected shot holes and their scores on the image."""
+    annotated_image = image.copy()
+    CALIBRE_MM = 4.5 if calibre == 0.177 else 5.6
+    shot_radius_px = int((CALIBRE_MM / 2) * pixels_per_mm)
+
+    for i, coords in enumerate(shot_holes):
+        # Draw a circle around the shot
+        cv2.circle(annotated_image, coords, shot_radius_px + 3, (0, 255, 0), 2) # Green circle
+
+        # Put the score text next to the shot
+        score_text = str(scores[i])
+        text_coords = (coords[0] + shot_radius_px, coords[1] - shot_radius_px)
+        cv2.putText(annotated_image, score_text, text_coords, cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2) # Red text
+
+    return annotated_image
+
+def run_scoring_pipeline(image_path, calibre):
+    """
+    Runs the full CV pipeline on an image and returns the results.
+    This function is designed to be called from other modules (like the GUI).
+    """
+    # Load the image
+    image = cv2.imread(image_path)
+    if image is None:
+        print(f"Error: Could not load image from path: {image_path}")
+        return None
+
+    # Run the pipeline
+    corrected_image = localize_target(image)
+    center, pixels_per_mm = find_center_and_calibrate_scale(corrected_image)
+    shot_holes = detect_shot_holes(corrected_image, calibre, pixels_per_mm)
+    total_score, individual_scores = calculate_score(shot_holes, center, pixels_per_mm, calibre)
+
+    # Annotate the image with results
+    annotated_image = draw_results_on_image(corrected_image, shot_holes, individual_scores, pixels_per_mm, calibre)
+
+    return {
+        "total_score": total_score,
+        "individual_scores": individual_scores,
+        "annotated_image": annotated_image,
+        "shot_holes": shot_holes,
+    }
 
 def create_synthetic_target(width=600, height=600, shot_holes_info=None, is_test=False):
     """
@@ -272,32 +298,25 @@ def create_synthetic_target(width=600, height=600, shot_holes_info=None, is_test
 
 def main():
     """
-    Main function to run the scoring process.
+    Main function for command-line execution.
     """
     parser = argparse.ArgumentParser(description="Score NSRA PL14 target cards.")
     parser.add_argument("--image", required=True, help="Path to the target image.")
     parser.add_argument("--calibre", required=True, type=float, choices=[0.177, 0.22], help="Calibre of the shots (.177 or .22).")
     args = parser.parse_args()
 
-    # Load the image from the specified path
-    image = cv2.imread(args.image)
-    if image is None:
-        print(f"Error: Could not load image from path: {args.image}")
-        return
-
     print(f"Processing image: {args.image} for calibre: {args.calibre}")
 
-    # CV Pipeline
-    corrected_image = localize_target(image)
-    center, pixels_per_mm = find_center_and_calibrate_scale(corrected_image)
-    shot_holes = detect_shot_holes(corrected_image, args.calibre, pixels_per_mm)
-    total_score, individual_scores = calculate_score(shot_holes, center, pixels_per_mm, args.calibre)
+    results = run_scoring_pipeline(args.image, args.calibre)
 
-    print(f"\n--- Scoring Complete ---")
-    print(f"Total Score: {total_score}")
-    print(f"Individual Scores: {individual_scores}")
-    print("------------------------")
-
+    if results:
+        print(f"\n--- Scoring Complete ---")
+        print(f"Total Score: {results['total_score']}")
+        print(f"Individual Scores: {results['individual_scores']}")
+        print("------------------------")
+        # In a real application, you would display or save the annotated_image
+        # cv2.imshow("Annotated Image", results['annotated_image'])
+        # cv2.waitKey(0)
 
 if __name__ == "__main__":
     main()
